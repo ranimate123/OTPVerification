@@ -1,0 +1,140 @@
+global with sharing class TestOTPVerificationController {
+    
+    public String mobileNumber { get; set; }
+    public String sourceOfEnquiry { get; set; }
+    public String enteredOtp { get; set; }
+    public String otpPrefix { get; private set; }
+    
+    public TestOTPVerificationController() {
+        mobileNumber = ApexPages.currentPage().getParameters().get('mobile');
+        sourceOfEnquiry = ApexPages.currentPage().getParameters().get('source');
+    }
+    
+    @RemoteAction
+    global static String sendOtp(
+        String mobileNumber,
+        String customerName,
+        String sourceOfEnquiry,
+        String noOfCp,
+        String channelPartnerName
+    ) {
+        try {
+            // Mobile validation
+            if (String.isBlank(mobileNumber) || mobileNumber.length() != 10 || !mobileNumber.isNumeric()) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'error',
+                    'message' => 'Invalid mobile number. Please enter a 10-digit number.'
+                });
+            }
+            
+            // Add country code (India +91) – adjust if your numbers are international
+            String fullMobile = '+91' + mobileNumber.trim();
+            
+            // Platform Cache
+            Cache.OrgPartition partition = Cache.Org.getPartition('local.OTPCache');
+            if (partition == null) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'error',
+                    'message' => 'Cache configuration error'
+                });
+            }
+            
+            // OTP generation
+            Integer otp = (Integer)(Math.random() * 9000) + 1000;
+            Integer partnerOtp = null;
+            String prefix = 'M-';
+            
+            if (sourceOfEnquiry == 'Channel Partner') {
+                partnerOtp = (Integer)(Math.random() * 9000) + 1000;
+                prefix = 'C-';
+            }
+            
+            partition.put(mobileNumber + 'CUSTOMER', otp, 300);
+            if (partnerOtp != null) {
+                partition.put(mobileNumber + 'PARTNER', partnerOtp, 300);
+            }
+            
+            // Build plain-text message
+            String message;
+            if (sourceOfEnquiry == 'Channel Partner') {
+                message = prefix + partnerOtp + ' & M-' + otp + ' are your verification codes. Expires in 5 min. Do not share.';
+            } else {
+                message = prefix + otp + ' is your verification code. Expires in 5 min. Do not share.';
+            }
+            
+            // SEND SMS – this is the confirmed method from 360 SMS community examples
+            tdc_tsw.GlobalSMSSender.sendSmsWithPhoneNumberAndMessageText(
+                fullMobile, 
+                message, 
+                UserInfo.getUserId()
+            );
+            
+            
+            
+            return JSON.serialize(new Map<String, Object>{
+                'status' => 'success',
+                'otpPrefix' => prefix,
+                'message' => 'OTP sent successfully'
+            });
+            
+        } catch (Exception e) {
+            return JSON.serialize(new Map<String, String>{
+                'status' => 'error',
+                'message' => 'Error sending OTP: ' + e.getMessage() + ' | Line: ' + e.getLineNumber()
+            });
+        }
+    }
+    
+    @RemoteAction
+    global static String matchOtp(
+        String mobileNumber,
+        Integer enteredOtp,
+        String sourceOfEnquiry
+    ) {
+        try {
+            Cache.OrgPartition partition = Cache.Org.getPartition('local.OTPCache');
+            if (partition == null) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'error',
+                    'message' => 'Cache configuration error'
+                });
+            }
+            
+            Integer customerOtp = (Integer) partition.get(mobileNumber + 'CUSTOMER');
+            Integer partnerOtp = (Integer) partition.get(mobileNumber + 'PARTNER');
+            
+            Boolean isValid = false;
+            
+            if (sourceOfEnquiry == 'Channel Partner') {
+                if (enteredOtp == customerOtp || (partnerOtp != null && enteredOtp == partnerOtp)) {
+                    isValid = true;
+                    partition.remove(mobileNumber + 'CUSTOMER');
+                    if (partnerOtp != null) partition.remove(mobileNumber + 'PARTNER');
+                }
+            } else {
+                if (enteredOtp == customerOtp) {
+                    isValid = true;
+                    partition.remove(mobileNumber + 'CUSTOMER');
+                }
+            }
+            
+            if (isValid) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'success',
+                    'message' => 'OTP verified successfully'
+                });
+            }
+            
+            return JSON.serialize(new Map<String, String>{
+                'status' => 'error',
+                'message' => 'Invalid OTP'
+            });
+            
+        } catch (Exception e) {
+            return JSON.serialize(new Map<String, String>{
+                'status' => 'error',
+                'message' => 'Verification error: ' + e.getMessage()
+            });
+        }
+    }
+}

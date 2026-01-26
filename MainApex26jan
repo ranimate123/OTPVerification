@@ -1,0 +1,111 @@
+global with sharing class TestOTPVerificationController {
+    
+    public String mobileNumber    { get; set; }
+    public String sourceOfEnquiry { get; set; }
+    public String enteredOtp      { get; set; }
+    public String otpPrefix       { get; private set; }
+    
+    public TestOTPVerificationController() {
+        mobileNumber    = ApexPages.currentPage().getParameters().get('mobile');
+        sourceOfEnquiry = ApexPages.currentPage().getParameters().get('source');
+    }
+    
+    @RemoteAction
+    global static String sendOtp(
+        String mobileNumber,
+        String customerName,
+        String sourceOfEnquiry,
+        String noOfCp,
+        String channelPartnerName
+    ) {
+        try {
+            if (String.isBlank(mobileNumber) || mobileNumber.length() != 10 || !mobileNumber.isNumeric()) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'error',
+                        'message' => 'Invalid mobile number'
+                        });
+            }
+            
+            Cache.OrgPartition partition = Cache.Org.getPartition('local.OTPCache');
+            if (partition == null) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'error',
+                        'message' => 'Cache configuration error'
+                        });
+            }
+            
+            Integer otp = (Integer)(Math.random() * 9000) + 1000;
+            System.debug('Generated OTP for mobile ' + mobileNumber + ' is: ' + otp);
+
+            partition.put(mobileNumber, otp, 300);
+            
+            String templateId = 'a19fv000000ImcTAAS';
+            
+            tdc_tsw.GlobalSMSSender.sendSmsWithPhoneAPiAndTemplateId(
+                mobileNumber,
+                templateId,
+                UserInfo.getUserId()
+            );
+            
+            return JSON.serialize(new Map<String, String>{
+                'status' => 'success',
+                    'message' => 'OTP sent successfully'
+                    });
+            
+        } catch (Exception e) {
+            return JSON.serialize(new Map<String, String>{
+                'status' => 'error',
+                    'message' => 'Error: ' + e.getMessage()
+                    });
+        }
+    }
+    
+    
+    @RemoteAction
+    global static String matchOtp(
+        String mobileNumber,
+        Integer enteredOtp,
+        String sourceOfEnquiry
+    ) {
+        try {
+            if (String.isBlank(mobileNumber) || enteredOtp == null) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'error',
+                        'message' => 'Invalid OTP'
+                        });
+            }
+            
+            Cache.OrgPartition partition = Cache.Org.getPartition('local.OTPCache');
+            if (partition == null) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'error',
+                        'message' => 'Cache configuration error'
+                        });
+            }
+            
+            Integer storedOtp = (Integer) partition.get(mobileNumber);
+            
+            if (storedOtp == null || enteredOtp != storedOtp) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'error',
+                        'message' => 'Invalid OTP'
+                        });
+            }
+            
+            partition.remove(mobileNumber);
+            
+            return JSON.serialize(new Map<String, String>{
+                'status' => 'success',
+                    'message' => 'OTP verified successfully'
+                    });
+            
+        } catch (Exception e) {
+            return JSON.serialize(new Map<String, String>{
+                'status' => 'error',
+                    'message' => 'Verification error: ' + e.getMessage()
+                    });
+        }
+    }
+    
+    
+}

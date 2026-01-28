@@ -1,0 +1,361 @@
+global with sharing class TestOTPVerificationController {
+    
+    public String mobileNumber    { get; set; }
+    public String sourceOfEnquiry { get; set; }
+    public String enteredOtp      { get; set; }
+    public String otpPrefix       { get; private set; }
+    
+    public TestOTPVerificationController() {
+        mobileNumber    = ApexPages.currentPage().getParameters().get('mobile');
+        sourceOfEnquiry = ApexPages.currentPage().getParameters().get('source');
+    }
+    
+    @RemoteAction
+    global static String sendOtp(
+        String mobileNumber,
+        String customerName,
+        String sourceOfEnquiry,
+        String noOfCp,
+        String channelPartnerName
+    ) {
+        try {
+            if (String.isBlank(mobileNumber) || mobileNumber.length() != 10 || !mobileNumber.isNumeric()) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'error',
+                        'message' => 'Invalid mobile number'
+                        });
+            }
+            
+            Cache.OrgPartition partition = Cache.Org.getPartition('local.OTPCache');
+            if (partition == null) {
+                return JSON.serialize(new Map<String, String>{
+                    'status' => 'error',
+                        'message' => 'Cache configuration error'
+                        });
+            }
+            
+            Integer otp = (Integer)(Math.random() * 9000) + 1000;
+            System.debug('Generated OTP for mobile ' + mobileNumber + ' is: ' + otp);
+            
+            partition.put(mobileNumber, otp, 300);
+            
+            String templateId = 'a19fv000000ImcTAAS';
+            
+            tdc_tsw.GlobalSMSSender.sendSmsWithPhoneAPiAndTemplateId(
+                mobileNumber,
+                templateId,
+                UserInfo.getUserId()
+            );
+            system.debug('OTP Sent'  +OTP);
+            
+            return JSON.serialize(new Map<String, String>{
+                'status' => 'success',
+                    'message' => 'OTP sent successfully'
+                    });
+            
+        } catch (Exception e) {
+            return JSON.serialize(new Map<String, String>{
+                'status' => 'error',
+                    'message' => 'Error: ' + e.getMessage()
+                    });
+        }
+    }
+     @RemoteAction
+    global static String matchOtp(
+        String mobileNumber,
+        Integer enteredOtp,
+        String sourceOfEnquiry
+    ) {
+        try {
+            System.debug('=== OTP VERIFY START ===');
+            System.debug('Entered OTP : ' + enteredOtp);
+
+            if (String.isBlank(mobileNumber) || enteredOtp == null) {
+                return JSON.serialize(new Map<String, String>{
+                    'status'  => 'error',
+                    'message' => 'Invalid OTP'
+                });
+            }
+
+            //  Get latest WhatsApp OTP message
+            List<tdc_tsw__Message__c> msgList = [
+                SELECT
+                    tdc_tsw__Message_Text_New__c,
+                    tdc_tsw__Template_JSON__c,
+                    CreatedDate
+                FROM tdc_tsw__Message__c
+                WHERE tdc_tsw__Channel__c   = 'WhatsApp'
+                  AND tdc_tsw__Source_Id__c = 'OTP'
+                ORDER BY CreatedDate DESC
+                LIMIT 1
+            ];
+
+            if (msgList.isEmpty()) {
+                System.debug('❌ No OTP record found');
+                return JSON.serialize(new Map<String, String>{
+                    'status'  => 'error',
+                    'message' => 'OTP not found. Please resend OTP.'
+                });
+            }
+
+            tdc_tsw__Message__c msg = msgList[0];
+
+            System.debug('Message Text  : ' + msg.tdc_tsw__Message_Text_New__c);
+            System.debug('Template JSON : ' + msg.tdc_tsw__Template_JSON__c);
+
+            String actualOtp;
+
+            //  Try Template JSON
+            if (msg.tdc_tsw__Template_JSON__c != null) {
+                Map<String, Object> jsonMap =
+                    (Map<String, Object>) JSON.deserializeUntyped(
+                        msg.tdc_tsw__Template_JSON__c
+                    );
+
+                if (jsonMap.containsKey('Calltoaction')) {
+                    List<Object> actions =
+                        (List<Object>) jsonMap.get('Calltoaction');
+
+                    if (!actions.isEmpty()) {
+                        Map<String, Object> action =
+                            (Map<String, Object>) actions[0];
+
+                        actualOtp = String.valueOf(action.get('OTP_Code'));
+                    }
+                }
+            }
+
+            // 2️ Fallback: parse message text
+            if (actualOtp == null &&
+                msg.tdc_tsw__Message_Text_New__c != null) {
+
+                Matcher m =
+                    Pattern.compile('(\\d{4,6})')
+                           .matcher(msg.tdc_tsw__Message_Text_New__c);
+
+                if (m.find()) actualOtp = m.group(1);
+            }
+
+            System.debug('Actual OTP : ' + actualOtp);
+
+            //  Match
+            if (actualOtp == null ||
+                actualOtp != String.valueOf(enteredOtp)) {
+
+                return JSON.serialize(new Map<String, String>{
+                    'status'  => 'error',
+                    'message' => 'Invalid OTP'
+                });
+            }
+
+            System.debug(' OTP VERIFIED');
+
+            return JSON.serialize(new Map<String, String>{
+                'status'  => 'success',
+                'message' => 'OTP verified successfully'
+            });
+
+        } catch (Exception e) {
+            System.debug(' VERIFY ERROR : ' + e.getMessage());
+            return JSON.serialize(new Map<String, String>{
+                'status'  => 'error',
+                'message' => 'Verification error: ' + e.getMessage()
+            });
+        }
+    }
+    
+}
+
+
+======================
+@IsTest
+private class TestOTPVerificationControllerTest {
+
+    private static final String TEST_MOBILE     = '7745824565';
+    private static final String TEST_MOBILE_ALT = '9876543210';
+    private static final String SOURCE_DIRECT   = 'Direct';
+    private static final String TEST_CUSTOMER_NAME  = 'Rani Sharma';
+
+    // ────────────────────────────────────────────────
+    // Helpers
+    // ────────────────────────────────────────────────
+    private static Cache.OrgPartition getOtpCache() {
+        return Cache.Org.getPartition('local.OTPCache');
+    }
+
+    private static Boolean hasOtpCachePartition() {
+        return getOtpCache() != null;
+    }
+
+    private static void skipIfNoCache() {
+        if (!hasOtpCachePartition()) {
+            System.assert(true, 'Skipping – OTPCache partition not configured');
+        }
+    }
+
+    // ────────────────────────────────────────────────
+    // Constructor
+    // ────────────────────────────────────────────────
+    @IsTest
+    static void testConstructor_readsUrlParameters() {
+        ApexPages.currentPage().getParameters().put('mobile', TEST_MOBILE);
+        ApexPages.currentPage().getParameters().put('source', SOURCE_DIRECT);
+
+        TestOTPVerificationController ctrl = new TestOTPVerificationController();
+
+        System.assertEquals(TEST_MOBILE, ctrl.mobileNumber);
+        System.assertEquals(SOURCE_DIRECT, ctrl.sourceOfEnquiry);
+        System.assertEquals(null, ctrl.enteredOtp);
+        System.assertEquals(null, ctrl.otpPrefix);
+    }
+
+    @IsTest
+    static void testConstructor_noParameters() {
+        TestOTPVerificationController ctrl = new TestOTPVerificationController();
+        System.assertEquals(null, ctrl.mobileNumber);
+        System.assertEquals(null, ctrl.sourceOfEnquiry);
+    }
+
+    // ────────────────────────────────────────────────
+    // sendOtp – validation & success
+    // ────────────────────────────────────────────────
+    @IsTest
+    static void test_sendOtp_invalidMobile_rejected() {
+        String jsonStr = TestOTPVerificationController.sendOtp('123', TEST_CUSTOMER_NAME, SOURCE_DIRECT, null, null);
+        Map<String, Object> res = (Map<String, Object>) JSON.deserializeUntyped(jsonStr);
+        System.assertEquals('error', res.get('status'));
+        System.assert(res.get('message').toString().toLowerCase().contains('invalid'));
+
+        jsonStr = TestOTPVerificationController.sendOtp('98765abcde', TEST_CUSTOMER_NAME, SOURCE_DIRECT, null, null);
+        res = (Map<String, Object>) JSON.deserializeUntyped(jsonStr);
+        System.assertEquals('error', res.get('status'));
+    }
+
+    @IsTest
+    static void test_sendOtp_success() {
+        skipIfNoCache();
+
+        String jsonStr = TestOTPVerificationController.sendOtp(TEST_MOBILE, TEST_CUSTOMER_NAME, SOURCE_DIRECT, null, null);
+        Map<String, Object> res = (Map<String, Object>) JSON.deserializeUntyped(jsonStr);
+
+        System.assertEquals('success', res.get('status'));
+        System.assertEquals('OTP sent successfully', res.get('message'));
+
+        Integer otp = (Integer) getOtpCache().get(TEST_MOBILE);
+        System.assertNotEquals(null, otp);
+        System.assertEquals(4, String.valueOf(otp).length());
+    }
+
+    // ====================================================
+    // SUCCESS: matchOtp using Template JSON
+    // ====================================================
+    @IsTest
+    static void test_matchOtp_success_templateJson() {
+
+        tdc_tsw__Message__c msg = new tdc_tsw__Message__c();
+        msg.tdc_tsw__Channel__c = 'WhatsApp';
+        msg.tdc_tsw__Source_Id__c = 'OTP';
+        msg.tdc_tsw__Message_Text_New__c = 'Your OTP is 1234';
+        msg.tdc_tsw__Template_JSON__c = '{"Calltoaction":[{"OTP_Code":"1234"}]}';
+        insert msg;
+
+        String res = TestOTPVerificationController.matchOtp(
+            TEST_MOBILE, 1234, SOURCE_DIRECT
+        );
+
+        Map<String, String> out = (Map<String, String>) JSON.deserialize(res, Map<String, String>.class);
+        System.assertEquals('success', out.get('status'));
+        System.assertEquals('OTP verified successfully', out.get('message'));
+    }
+
+    // ====================================================
+    // SUCCESS: matchOtp fallback to message text parsing
+    // ====================================================
+    @IsTest
+    static void test_matchOtp_success_fallbackText() {
+
+        tdc_tsw__Message__c msg = new tdc_tsw__Message__c();
+        msg.tdc_tsw__Channel__c = 'WhatsApp';
+        msg.tdc_tsw__Source_Id__c = 'OTP';
+        msg.tdc_tsw__Message_Text_New__c = 'Your OTP is 5678';
+        msg.tdc_tsw__Template_JSON__c = null;
+        insert msg;
+
+        String res = TestOTPVerificationController.matchOtp(
+            TEST_MOBILE, 5678, SOURCE_DIRECT
+        );
+
+        Map<String, String> out = (Map<String, String>) JSON.deserialize(res, Map<String, String>.class);
+        System.assertEquals('success', out.get('status'));
+    }
+
+    // ====================================================
+    // ERROR: wrong OTP entered
+    // ====================================================
+    @IsTest
+    static void test_matchOtp_wrongOtp() {
+
+        tdc_tsw__Message__c msg = new tdc_tsw__Message__c();
+        msg.tdc_tsw__Channel__c = 'WhatsApp';
+        msg.tdc_tsw__Source_Id__c = 'OTP';
+        msg.tdc_tsw__Message_Text_New__c = 'Your OTP is 9999';
+        msg.tdc_tsw__Template_JSON__c = '{"Calltoaction":[{"OTP_Code":"9999"}]}';
+        insert msg;
+
+        String res = TestOTPVerificationController.matchOtp(
+            TEST_MOBILE, 1234, SOURCE_DIRECT
+        );
+
+        Map<String, String> out = (Map<String, String>) JSON.deserialize(res, Map<String, String>.class);
+        System.assertEquals('error', out.get('status'));
+        System.assertEquals('Invalid OTP', out.get('message'));
+    }
+
+    // ====================================================
+    // ERROR: no OTP records exist
+    // ====================================================
+    @IsTest
+    static void test_matchOtp_noOtpRecords() {
+        // Do nothing, no OTP messages inserted in this test context
+
+        String res = TestOTPVerificationController.matchOtp(
+            TEST_MOBILE, 1234, SOURCE_DIRECT
+        );
+
+        Map<String, String> out = (Map<String, String>) JSON.deserialize(res, Map<String, String>.class);
+        System.assertEquals('error', out.get('status'));
+        System.assertEquals('OTP not found. Please resend OTP.', out.get('message'));
+    }
+
+    // ====================================================
+    // ERROR: null OTP
+    // ====================================================
+    @IsTest
+    static void test_matchOtp_nullOtp() {
+        String res = TestOTPVerificationController.matchOtp(
+            TEST_MOBILE, null, SOURCE_DIRECT
+        );
+
+        Map<String, String> out = (Map<String, String>) JSON.deserialize(res, Map<String, String>.class);
+        System.assertEquals('error', out.get('status'));
+        System.assertEquals('Invalid OTP', out.get('message'));
+    }
+
+    // ====================================================
+    // ERROR: blank mobile number
+    // ====================================================
+    @IsTest
+    static void test_matchOtp_blankMobile() {
+        String res = TestOTPVerificationController.matchOtp(
+            '', 1234, SOURCE_DIRECT
+        );
+
+        Map<String, String> out = (Map<String, String>) JSON.deserialize(res, Map<String, String>.class);
+        System.assertEquals('error', out.get('status'));
+        System.assertEquals('Invalid OTP', out.get('message'));
+    }
+}
+
+
+
+

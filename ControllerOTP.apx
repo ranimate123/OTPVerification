@@ -138,3 +138,150 @@ global with sharing class TestOTPVerificationController {
         }
     }
 }
+
+
+==========================
+===========================
+@IsTest
+public class TestOTPVerificationControllerTest {
+
+    private static final String VALID_MOBILE = '9876543210';
+
+    /* ============================
+       CONSTRUCTOR
+       ============================ */
+    @IsTest
+    static void testControllerConstructor() {
+        PageReference pageRef = new PageReference('/apex/TestPage');
+        Test.setCurrentPage(pageRef);
+
+        ApexPages.currentPage().getParameters().put('mobile', VALID_MOBILE);
+        ApexPages.currentPage().getParameters().put('source', 'Website');
+
+        TestOTPVerificationController controller =
+            new TestOTPVerificationController();
+
+        System.assertEquals(VALID_MOBILE, controller.mobileNumber);
+        System.assertEquals('Website', controller.sourceOfEnquiry);
+    }
+
+    /* ============================
+       SEND OTP – NORMAL
+       ============================ */
+    @IsTest
+    static void testSendOtpSuccess_Normal() {
+        Test.startTest();
+        String response = TestOTPVerificationController.sendOtp(
+            VALID_MOBILE, 'Test User', 'Website', '1', null
+        );
+        Test.stopTest();
+
+        System.assert(response.contains('"status":"success"'));
+        System.assert(response.contains('"otpPrefix":"M-"'));
+    }
+
+    /* ============================
+       SEND OTP – CHANNEL PARTNER
+       ============================ */
+    @IsTest
+    static void testSendOtpSuccess_ChannelPartner() {
+        Test.startTest();
+        String response = TestOTPVerificationController.sendOtp(
+            VALID_MOBILE, 'Partner', 'Channel Partner', '2', 'Partner Name'
+        );
+        Test.stopTest();
+
+        System.assert(response.contains('"status":"success"'));
+        System.assert(response.contains('"otpPrefix":"C-"'));
+    }
+
+    /* ============================
+       SEND OTP – INVALID MOBILE
+       ============================ */
+    @IsTest
+    static void testSendOtpInvalidMobile() {
+        Test.startTest();
+        String response = TestOTPVerificationController.sendOtp(
+            '123', 'User', 'Website', '1', null
+        );
+        Test.stopTest();
+
+        System.assert(response.contains('"status":"error"'));
+    }
+
+    /* ============================
+       MATCH OTP – NORMAL
+       ============================ */
+    @IsTest
+    static void testMatchOtpSuccess_Normal() {
+        Cache.OrgPartition partition =
+            Cache.Org.getPartition('local.OTPCache');
+
+        partition.put(VALID_MOBILE + 'CUSTOMER', 1234, 300);
+
+        Test.startTest();
+        String response = TestOTPVerificationController.matchOtp(
+            VALID_MOBILE, 1234, 'Website'
+        );
+        Test.stopTest();
+
+        System.assert(response.contains('"status":"success"'));
+    }
+
+    /* ============================
+       MATCH OTP – CHANNEL PARTNER
+       ============================ */
+    @IsTest
+    static void testMatchOtp_ChannelPartner() {
+        Cache.OrgPartition partition =
+            Cache.Org.getPartition('local.OTPCache');
+
+        partition.put(VALID_MOBILE + 'CUSTOMER', 1111, 300);
+        partition.put(VALID_MOBILE + 'PARTNER', 2222, 300);
+
+        Test.startTest();
+        String response = TestOTPVerificationController.matchOtp(
+            VALID_MOBILE, 2222, 'Channel Partner'
+        );
+        Test.stopTest();
+
+        System.assert(response.contains('"status":"success"'));
+    }
+
+    /* ============================
+       MATCH OTP – INVALID OTP
+       ============================ */
+    @IsTest
+    static void testMatchOtpInvalidOtp() {
+        Cache.OrgPartition partition =
+            Cache.Org.getPartition('local.OTPCache');
+
+        partition.put(VALID_MOBILE + 'CUSTOMER', 9999, 300);
+
+        Test.startTest();
+        String response = TestOTPVerificationController.matchOtp(
+            VALID_MOBILE, 1111, 'Website'
+        );
+        Test.stopTest();
+
+        System.assert(response.contains('"status":"error"'));
+    }
+
+    /* ============================
+       MATCH OTP – EXCEPTION CATCH
+       ============================ */
+    @IsTest
+    static void testMatchOtpExceptionCatch() {
+        Test.startTest();
+
+        // Forces exception internally
+        String response = TestOTPVerificationController.matchOtp(
+            null, 1234, 'Website'
+        );
+
+        Test.stopTest();
+
+        // ✅ Only assert guaranteed behavior
+        System.assert(response.contains('"status":"error"'));
+    }
+}
